@@ -2754,93 +2754,46 @@ function updateRing(seconds) {
 }
 
 // ============================================================
-// SIGNAL SAMPLING – Zöld csatorna normalizálás (ujj+LED)
+// SIGNAL SAMPLING – Egyszerű EMA-alapú PPG (ujj + vaku)
+// Így működik minden ujjas pulzoximéter: piros csatorna,
+// lassú EMA a DC-re, gyors EMA a simításra,
+// küszöbátlépéses csúcsdetektor inicializálás NÉLKÜL.
 // ============================================================
 
-// Butterworth bandpass 0.7–2.5 Hz (42–150 BPM) @ 30fps
-// Szűkebb sáv = kevesebb zaj, pontosabb csúcsdetektálás
-class BandpassFilter {
-  constructor() {
-    // 4. rendű Butterworth 0.7-2.5Hz @ 30fps
-    this.b = [0.0891, 0.0, -0.1783, 0.0, 0.0891];
-    this.a = [1.0, -2.6280, 2.9513, -1.6918, 0.3941];
-    this.x = [0,0,0,0,0];
-    this.y = [0,0,0,0,0];
-  }
-  process(input) {
-    this.x.unshift(input); this.x.pop();
-    let out = this.b[0] * this.x[0];
-    for (let i = 1; i < 5; i++) out += this.b[i]*this.x[i] - this.a[i]*this.y[i-1];
-    this.y.unshift(out); this.y.pop();
-    return out;
-  }
-  reset() { this.x=[0,0,0,0,0]; this.y=[0,0,0,0,0]; }
-}
-
-// Adaptív csúcsdetektor – szigorúbb küszöb
-class PeakDetector {
-  constructor() { this.reset(); }
-  reset() {
-    this.signalPeak=0; this.noisePeak=0;
-    this.threshold=0; this.lastPeakTime=0;
-    this.initialized=false;
-  }
-  initialize(peak) {
-    this.signalPeak = peak;
-    this.threshold = peak * 0.6; // szigorúbb küszöb
-    this.initialized = true;
-  }
-  update(value, now) {
-    if (!this.initialized) return false;
-    // Adaptív küszöb frissítés
-    this.threshold = this.noisePeak + 0.35 * (this.signalPeak - this.noisePeak);
-    const timeSinceLast = now - this.lastPeakTime;
-    // Minimum 500ms két csúcs között (max 120 BPM)
-    if (value > this.threshold && timeSinceLast > 500) {
-      this.signalPeak = 0.1 * value + 0.9 * this.signalPeak;
-      this.lastPeakTime = now;
-      return true;
-    } else {
-      this.noisePeak = 0.1 * value + 0.9 * this.noisePeak;
-      return false;
-    }
-  }
-}
-
-const bpFilter = new BandpassFilter();
-const peakDetector = new PeakDetector();
-let initBuffer = [];
-
 function startSampling() {
-  const video = document.getElementById('cameraVideo');
+  const video  = document.getElementById('cameraVideo');
   const canvas = document.getElementById('cameraCanvas');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  canvas.width = 80;
+  const ctx    = canvas.getContext('2d', { willReadFrequently: true });
+  canvas.width  = 80;
   canvas.height = 80;
 
-  bpFilter.reset();
-  peakDetector.reset();
-  initBuffer = [];
+  // EMA állapotok
+  let dcEma     = -1;   // lassú EMA a DC baseline-hoz (először -1 = ninit)
+  let fastEma   = 0;    // gyors EMA simításhoz
+  let prevFast  = 0;    // előző frame jele (csúcsdetektáláshoz)
+  let peakAmp   = 0;    // adaptív amplitúdó becslés (küszöb alap)
+  let aboveThresh = false; // állapotgép: jel a küszöb felett van-e
 
-  // Piros csatorna gördülő átlag (DC eltávolítás)
-  const redBuffer = [];
-  const RED_WIN = 5;   // 5-frame simítás
-  const DC_WIN  = 90;  // ~3 mp @ 30fps – futó átlag a drift ellen
-
-  let prevRed = null;
+  // Mozgás
+  let prevRed    = -1;
   let motionScore = 0;
 
+  // EMA időállandók @ ~30fps
+  // DC (baseline): α=0.97 → τ≈1.1 s → levágja a <0.15 Hz drift-et
+  // Fast (simítás): α=0.6 → τ≈0.08 s → levágja a >4 Hz zajt
+  // Amplitúdó envelope: α=0.997 → ~10 s lassú decay
+  const DC_ALPHA  = 0.97;
+  const FA_ALPHA  = 0.60;
+  const AMP_DECAY = 0.997;
+  const MIN_RR_MS = 400;  // max ~150 BPM
+
   function updateLiveQuality() {
-    const rr = state.rrIntervals.length;
+    const rr    = state.rrIntervals.length;
     const dot   = document.getElementById('lqDot');
     const label = document.getElementById('lqLabel');
     const rrEl  = document.getElementById('lqRr');
     if (!dot || !label) return;
-
-    if (state.sampleCount < 60) {
-      dot.style.background = '#6b7280';
-      label.textContent = 'Inicializálás...';
-    } else if (motionScore > 0.08) {
+    if (motionScore > 0.08) {
       dot.style.background = '#f87171';
       label.textContent = '🔴 Tartsd mozdulatlanul!';
     } else if (rr < 3) {
@@ -2862,7 +2815,7 @@ function startSampling() {
     ctx.drawImage(video, 0, 0, 80, 80);
     const frame = ctx.getImageData(0, 0, 80, 80).data;
 
-    // Középső 40×40 ROI
+    // Középső 40×40 ROI átlaga
     let r = 0, g = 0, b = 0, count = 0;
     for (let py = 20; py < 60; py++) {
       for (let px = 20; px < 60; px++) {
@@ -2873,7 +2826,7 @@ function startSampling() {
     }
     r /= count; g /= count; b /= count;
 
-    // Ujj jelenlét: vaku esetén R >> G,B
+    // Ujj jelenlét: piros erősen domináns (vaku vörös/IR fénye)
     if (r < 80 || r < g * 1.05) {
       const dot   = document.getElementById('lqDot');
       const label = document.getElementById('lqLabel');
@@ -2886,83 +2839,78 @@ function startSampling() {
     const now = performance.now();
     state.sampleCount++;
 
-    // Mozgás detektálás – piros csatorna stabilitás
-    if (prevRed !== null) {
-      const diff = Math.abs(r - prevRed) / 255;
-      motionScore = motionScore * 0.9 + diff * 0.1;
+    // Mozgás score – piros csatorna változás
+    if (prevRed >= 0) {
+      motionScore = 0.9 * motionScore + 0.1 * Math.abs(r - prevRed) / 255;
     }
     prevRed = r;
-
-    // ============================================================
-    // PIROS CSATORNA – ujj + vaku esetén ez a legjobb PPG jel
-    // A vaku LED vörös/IR fénye áthalad az ujjon és a vérpulzus
-    // a piros csatornában látszik a legmarkánsabban.
-    // ============================================================
-
-    // 1. Piros normalizálás a megvilágítás ingadozása ellen
-    const rNorm = r / (r + g + b + 1e-6);
-
-    // 2. Rövid simítás (5-frame) – magas frekvenciás zaj ellen
-    redBuffer.push(rNorm);
-    if (redBuffer.length > RED_WIN) redBuffer.shift();
-    const rSmooth = redBuffer.reduce((a, v) => a + v, 0) / redBuffer.length;
-
-    // 3. Futó átlag DC szint (lassú drift eltávolítás)
-    state.signalBuffer.push(rSmooth);
-    if (state.signalBuffer.length > DC_WIN) state.signalBuffer.shift();
-
-    const dcLevel = state.signalBuffer.reduce((a, v) => a + v, 0) / state.signalBuffer.length;
-
-    // 4. AC komponens = tényleges pulzusjel
-    const rppg = rSmooth - dcLevel;
-
-    // Mozgás esetén kihagyjuk a csúcsdetektálást
     const skipPeak = motionScore > 0.08;
 
-    // 5. Bandpass szűrő (0.7–2.5 Hz)
-    const filtered  = bpFilter.process(rppg);
-    const rectified = Math.abs(filtered);
+    // ── Jelfeldolgozás ──────────────────────────────────────
+    // 1. EMA inicializálás első mintánál
+    if (dcEma < 0) { dcEma = r; fastEma = r; prevFast = r; }
 
-    // Inicializálás: első 60 minta
-    if (state.sampleCount < 60) {
-      initBuffer.push(rectified);
-      if (state.sampleCount === 59) {
-        const maxVal = Math.max(...initBuffer);
-        peakDetector.initialize(maxVal > 0 ? maxVal : 0.0001);
+    // 2. Gyors simítás (HF zaj ellen)
+    fastEma = FA_ALPHA * fastEma + (1 - FA_ALPHA) * r;
+
+    // 3. Lassú DC baseline
+    dcEma = DC_ALPHA * dcEma + (1 - DC_ALPHA) * fastEma;
+
+    // 4. AC komponens = a tényleges pulzusjel
+    const signal = fastEma - dcEma;
+
+    // 5. Adaptív amplitúdó (envelope)
+    peakAmp = Math.max(peakAmp * AMP_DECAY, Math.abs(signal));
+
+    // ── Csúcsdetektor: küszöbátlépés állapotgéppel ──────────
+    // Elég adat van-e már? (kb. 1 másodperc után indul)
+    const ready = state.sampleCount > 30 && peakAmp > 0.05;
+    const threshold = peakAmp * 0.35;
+    let isPeak = false;
+
+    if (ready && !skipPeak) {
+      if (!aboveThresh && signal > threshold) {
+        // Jel átlépte a küszöböt felfelé → emelkedés indul
+        aboveThresh = true;
+      } else if (aboveThresh && signal < threshold) {
+        // Jel visszaesett a küszöb alá → csúcs volt az előző max
+        aboveThresh = false;
+        const timeSinceLast = now - state.lastPeakTime;
+        if (timeSinceLast > MIN_RR_MS) {
+          isPeak = true;
+        }
       }
-      updateWaveform(filtered);
-      updateLiveQuality();
-      state.animFrame = requestAnimationFrame(sample);
-      return;
     }
 
-    // 6. Csúcsdetektálás
-    const isPeak = !skipPeak && peakDetector.update(rectified, now);
+    prevFast = fastEma;
 
+    // ── RR feldolgozás ───────────────────────────────────────
     if (isPeak && state.lastPeakTime > 0) {
       const rr = now - state.lastPeakTime;
-      if (rr >= 450 && rr <= 1400) {
+      if (rr >= MIN_RR_MS && rr <= 1500) {
         const prevRR = state.rrIntervals[state.rrIntervals.length - 1];
-        const tooWeird = prevRR && Math.abs(rr - prevRR) / prevRR > 0.35;
+        const tooWeird = prevRR && Math.abs(rr - prevRR) / prevRR > 0.40;
         if (!tooWeird) {
           state.rrIntervals.push(rr);
           state.peakTimes.push(now);
-          if (state.rrIntervals.length >= 4) {
-            const lastRRs = state.rrIntervals.slice(-8);
-            const avgRR   = lastRRs.reduce((a, b) => a + b, 0) / lastRRs.length;
+          if (state.rrIntervals.length >= 3) {
+            const lastRRs = state.rrIntervals.slice(-6);
+            const avgRR   = lastRRs.reduce((a, v) => a + v, 0) / lastRRs.length;
             const bpm     = Math.round(60000 / avgRR);
-            if (bpm >= 42 && bpm <= 130) {
+            if (bpm >= 40 && bpm <= 150) {
               document.getElementById('liveBpm').textContent = bpm;
             }
           }
         }
       }
     }
-
     if (isPeak) state.lastPeakTime = now;
 
-    if (state.sampleCount % 30 === 0) updateLiveQuality();
-    updateWaveform(filtered);
+    // Waveform megjelenítés
+    state.signalBuffer.push(signal);
+    if (state.signalBuffer.length > 120) state.signalBuffer.shift();
+    if (state.sampleCount % 10 === 0) updateLiveQuality();
+    updateWaveform(signal);
     state.animFrame = requestAnimationFrame(sample);
   }
 
