@@ -1,6 +1,6 @@
 // IBAR Egyensúly – Service Worker
 // Verzió: 2026-03-10-r2
-const CACHE_VERSION = '2026-03-21-r12';
+const CACHE_VERSION = '2026-03-21-r14';
 const CACHE_NAME = 'ibar-cache-' + CACHE_VERSION;
 
 const ASSETS = [
