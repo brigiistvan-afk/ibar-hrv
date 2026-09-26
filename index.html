@@ -1490,6 +1490,11 @@
     padding-left: 10px; margin-top: 8px !important;
     font-style: italic;
   }
+  .ljn-question-item {
+    font-size: 14px; color: var(--text); line-height: 1.6;
+    padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .ljn-question-item:last-child { border-bottom: none; }
 
   /* Verzió kártya */
   .info-version-card {
@@ -1554,6 +1559,20 @@
     margin-bottom: 8px;
   }
   .dpc-sub { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+
+  .daily-question-card {
+    background: linear-gradient(135deg, rgba(52,211,153,0.12), rgba(129,140,248,0.12));
+    border: 1px solid rgba(129,140,248,0.25);
+    border-radius: 20px; padding: 20px;
+    text-align: center; margin-bottom: 14px;
+  }
+  .dqc-icon { font-size: 32px; margin-bottom: 10px; }
+  .dqc-text {
+    font-size: 15px; color: var(--text); line-height: 1.6;
+    font-family: 'DM Serif Display', serif; font-style: italic;
+    margin-bottom: 8px;
+  }
+  .dqc-sub { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 
   /* Gyors stresszoldók szekció */
   .quick-section-title {
@@ -2306,6 +2325,13 @@
     <div class="dpc-sub">A mai napod üzenete</div>
   </div>
 
+  <!-- Napi kérdés kártya -->
+  <div class="daily-question-card" id="dailyQuestionCard">
+    <div class="dqc-icon" id="dqcIcon">🧭</div>
+    <div class="dqc-text" id="dqcText">–</div>
+    <div class="dqc-sub">A mai nap kérdése</div>
+  </div>
+
   <!-- Mi a stressz? összecsukható -->
   <div class="info-accordion-card" style="margin-bottom:14px;">
     <div class="info-acc-header" onclick="toggleAcc('accStressInfo')">
@@ -2393,6 +2419,17 @@
     <div class="ljn-affirmation-wrap" id="ljnAffirmWrap">
       <div class="ljn-affirmation-label">Mai megerősítés:</div>
       <div class="ljn-affirmation" id="ljnAffirm">–</div>
+    </div>
+  </div>
+
+  <!-- Kérdezd meg magadtól – összecsukható -->
+  <div class="info-accordion-card" style="margin-top:14px;">
+    <div class="info-acc-header" onclick="toggleAcc('accLjnQuestions')">
+      <span>🧭 Kérdezd meg magadtól</span><span id="arrLjnQuestions">▾</span>
+    </div>
+    <div class="info-acc-body" id="accLjnQuestions" style="display:none;">
+      <p style="opacity:0.75; font-size:12.5px; margin-bottom:10px;">Nincs rájuk helyes válasz. Csak tedd fel magadnak a kérdést, és hagyj teret arra, ami érkezik.</p>
+      <div id="ljnQuestionsList"></div>
     </div>
   </div>
 
@@ -2827,6 +2864,14 @@ function resetBuffers() {
 }
 
 function beginCountdown() {
+  // Védelem: ha bármi miatt (pl. egy korábbi mérés hibásan szakadt meg)
+  // már fut egy időzítő, előbb töröljük – különben KÉT párhuzamos
+  // időzítő futna, ami "gyorsabban számol / ugrik" tünetet ad.
+  if (state.timer) {
+    clearInterval(state.timer);
+    state.timer = null;
+  }
+
   state.countdown = DURATION;
   state.measuring = true;
   updateRing(DURATION);
@@ -3695,7 +3740,10 @@ function saveAndShowResult(result) {
 
   // Update phase
   if (state.phase === 'before') {
-    saveBefore(result);  // localStorage-ba mentés – app bezárás esetén is megmarad
+    const beforeSaved = saveBefore(result);
+    if (!beforeSaved) {
+      alert('⚠️ A kezdő mérés eredménye nem sikerült elmenteni a böngésző tárhelyébe. Ha bezárod az appot, elveszhet az összehasonlításhoz – érdemes most rögtön elvégezni a "Kezelés utáni" mérést is, mielőtt kilépnél.');
+    }
     document.getElementById('tab-before').classList.add('done');
     document.getElementById('tab-before').querySelector('.tab-icon').textContent = '✅';
     document.getElementById('tab-after').classList.add('active');
@@ -3724,7 +3772,9 @@ function saveAndShowResult(result) {
     journal[key].hrv = result.rmssd;
     journal[key].hrvBefore = state.results.before?.rmssd || null;
     journal[key].sound = document.getElementById('meditMusicMode')?.value || null;
-    saveJournal(journal);
+    if (!saveJournal(journal)) {
+      console.error('[IBAR] A mai HRV-eredmény mentése a naplóba sikertelen volt.');
+    }
   }
 
   // Reset UI for next measurement
@@ -3787,7 +3837,11 @@ const HRV_BEFORE_KEY = 'ibar_hrv_before_v1';
 function saveBefore(result) {
   try {
     localStorage.setItem(HRV_BEFORE_KEY, JSON.stringify({ result, ts: Date.now() }));
-  } catch(e) {}
+    return true;
+  } catch(e) {
+    console.error('[IBAR] Kezdő mérés mentése sikertelen:', e);
+    return false;
+  }
 }
 
 function loadBefore() {
@@ -3883,6 +3937,13 @@ function stopCamera() {
 // NAVIGATION
 // ============================================================
 function switchSection(name) {
+  // Ha mérés közben navigálunk el a HRV fültől, ne fusson tovább
+  // láthatatlanul a háttérben a kamera és az időzítő – állítsuk le
+  // rendesen, eredmény-számítás nélkül.
+  if (name !== 'hrv' && state.measuring) {
+    abortMeasurement();
+  }
+
   const sections = { hrv: 'section-hrv', breath: 'section-breath', journal: 'section-journal', ljn: 'section-ljn', info: 'section-info' };
   Object.keys(sections).forEach(k => {
     const el = document.getElementById(sections[k]);
@@ -3902,6 +3963,23 @@ function switchSection(name) {
   const navBtn = document.getElementById('nav-' + name);
   if (navBtn) navBtn.classList.add('active');
   window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// Mérés megszakítása navigáció miatt – nem számol eredményt, csak
+// biztonságosan leállít mindent és visszaállítja a kezdő állapotot.
+function abortMeasurement() {
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  if (state.animFrame) { cancelAnimationFrame(state.animFrame); state.animFrame = null; }
+  state.measuring = false;
+  stopCamera();
+  const startOverlay = document.getElementById('startOverlay');
+  const measuringOverlay = document.getElementById('measuringOverlay');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  if (startOverlay) startOverlay.classList.remove('hidden');
+  if (measuringOverlay) measuringOverlay.classList.add('hidden');
+  if (startBtn) startBtn.style.display = 'flex';
+  if (stopBtn) stopBtn.style.display = 'none';
 }
 
 // ============================================================
@@ -3928,7 +4006,13 @@ Elég vagyok így, ahogy ma vagyok. Igyekvően – és ez valóban elég.
 A mai napom értékes volt, még ha minden a tervektől eltérően alakult is.`,
     affirmation: `„Ma elég voltam. Holnap újra próbálom."`,
     breath: 'Box légzés – Integráció',
-    breathId: 'integ'
+    breathId: 'integ',
+    questions: [
+      "Mi lenne, ha most, ebben a pillanatban, valóban elég lenne, amit tettél?",
+      "Mit tudnál elengedni, ha megengednéd magadnak?",
+      "Ki lennél, ha a teljesítmény helyett a jelenléted számítana?",
+      "Mi változna, ha a pihenés is eredménynek számítana?"
+    ]
   },
   anxiety: {
     icon: '😰',
@@ -3948,7 +4032,13 @@ A szorongásom csökken, amikor hagyom, hogy átfolyjon rajtam.
 Most biztonságban vagyok. Ez elég.`,
     affirmation: `„Ebben a pillanatban rendben vagyok. A jövőm nyitott, tele lehetőséggel."`,
     breath: 'Lassú oldó légzés 4-2-6',
-    breathId: 'oldo'
+    breathId: 'oldo',
+    questions: [
+      "Mi az, ami ebben a pillanatban, most, valójában rendben van?",
+      "Mit kérdeznél a szorongásod helyett, hogy megnyugtasd magad?",
+      "Ki lennél, ha a bizonytalanság kalanddá válna, félelem helyett?",
+      "Mi lenne, ha a jövőd sokkal könnyebb lenne, mint most gondolod?"
+    ]
   },
   self: {
     icon: '💙',
@@ -3968,7 +4058,13 @@ Az önszeretet az egyetlen alap, amiből valódi szeretetet adhatok másoknak is
 Ma egy lépéssel közelebb kerültem magamhoz.`,
     affirmation: `„Megérdemlem a saját kedvességemet. Ma a saját pártomon állok."`,
     breath: 'Szív-koherencia légzés',
-    breathId: 'prep'
+    breathId: 'prep',
+    questions: [
+      "Kihez beszélnél így, ha ő lenne a legjobb barátod?",
+      "Mit tudnál elismerni magadban, amit eddig észre sem vettél?",
+      "Mi lenne, ha a hibáid is hozzátartoznának ahhoz, hogy értékes vagy?",
+      "Milyen kedvességet adhatnál most magadnak?"
+    ]
   },
   relation: {
     icon: '🤝',
@@ -3988,7 +4084,13 @@ Elég, ha én rendben vagyok magammal – a többi ebből következik.
 A kapcsolataim fejlődhetnek – és én is fejlődhetek bennük.`,
     affirmation: `„A saját békémet megőrzöm, miközben nyitott maradok a másikra."`,
     breath: 'Box légzés – Integráció',
-    breathId: 'integ'
+    breathId: 'integ',
+    questions: [
+      "Mi lenne, ha mindkettőtöknek igaza lehetne a maga szemszögéből?",
+      "Mit szeretnél, hogy a másik tudjon rólad, amit eddig csendben tartottál?",
+      "Milyen határ szolgálna most mindkettőtöket?",
+      "Mi változna, ha kíváncsi lennél a másik nézőpontjára, ítélkezés helyett?"
+    ]
   },
   fatigue: {
     icon: '😴',
@@ -4008,7 +4110,13 @@ Hallgatok rá. Ez az egyik legfontosabb dolog, amit magamért tehetek.
 Holnap frissebben, könnyebben indulok.`,
     affirmation: `„A pihenés is munka. Megadom magamnak, amire szükségem van."`,
     breath: 'Szív-koherencia légzés',
-    breathId: 'prep'
+    breathId: 'prep',
+    questions: [
+      "Mit súg a tested, ha most tényleg meghallgatnád?",
+      "Mi lenne, ha a pihenés is teljesítmény lenne?",
+      "Milyen apró változtatás könnyítene most a napodon?",
+      "Mit engedhetnél el ma, hogy energiát nyerj?"
+    ]
   },
   overwhelm: {
     icon: '🌊',
@@ -4028,7 +4136,13 @@ Csak azt az egyet. A többi majd jön.
 Képes vagyok kezelni azt, ami valóban most van előttem.`,
     affirmation: `„Egy lépés elég. Most csak azt teszem meg."`,
     breath: '4-4-6 Mélylégzés',
-    breathId: '478'
+    breathId: '478',
+    questions: [
+      "Mi az az egy dolog, ami most valóban számít?",
+      "Mi lenne, ha csak a következő öt percre figyelnél?",
+      "Mit tehetnél le most, hogy könnyebb legyen a válladnak?",
+      "Ki segíthetne, ha megengednéd magadnak, hogy kérj?"
+    ]
   }
 ,
   anger: {
@@ -4039,9 +4153,9 @@ Ez az érzés jogos. Megengedem magamnak, hogy érzem.
 
 A düh mögött általában fájdalom, félelem vagy méltatlanság érzése húzódik meg. Most ezt is látom.
 
-Nem kell azonnal cselekednem. Veszek egy mély lélegzetet – és hagyom, hogy ez az energia lassan leülepedjen.
+Megállhatok egy pillanatra, mielőtt cselekszem. Veszek egy mély lélegzetet – és hagyom, hogy ez az energia lassan leülepedjen.
 
-Az erőm nem a robbanásban van – hanem abban, hogy képes vagyok megállni és választani.`,
+Az erőm abban van, hogy képes vagyok megállni és választani.`,
     integ: `A dühem jelzés volt – hallottam. Most elengedem, ami már megérett az elengedésre.
 
 A határaim érvényesek és fontosak. Képes vagyok azokat nyugodtan is megvédeni.
@@ -4049,27 +4163,39 @@ A határaim érvényesek és fontosak. Képes vagyok azokat nyugodtan is megvéd
 Ez az erő bennem van – és ma is rendelkezem vele.`,
     affirmation: `„Az erőm a nyugalmamban van. Választhatok, hogyan reagálok."`,
     breath: 'Oroszlán légzés vagy lassú oldó légzés',
-    breathId: 'oldo'
+    breathId: 'oldo',
+    questions: [
+      "Mit véd a dühöd valójában?",
+      "Mi lenne, ha a határaid kimondása önmagában erő lenne?",
+      "Milyen szükséglet húzódik a harag mögött?",
+      "Mit kezdhetnél ezzel az energiával, ami építő is lehetne?"
+    ]
   },
   sadness: {
     icon: '💔',
     oldo: `A szomorúság azt jelzi, hogy valami fontos volt – és most hiányzik.
 
-Megengedem magamnak, hogy szomorú legyek. Ez nem gyengeség – ez az érzékelőképességem.
+Megengedem magamnak, hogy szomorú legyek. Ez a mélyen érző képességem jele.
 
-A szomorúság nem örökre tart. Hullámokban jön és megy – ha hagyom.
+A szomorúság hullámokban jön és megy – ha hagyom, továbblép.
 
-Most csak itt vagyok, ezzel az érzéssel. Nem kell sietni, nem kell megmagyarázni.
+Most csak itt vagyok, ezzel az érzéssel, a magam tempójában, magyarázat nélkül.
 
 Egy apró dolog mindig marad: én magam vagyok. Lélegzem. Élek. Ez elég most.`,
     integ: `A szomorúságom azt mutatja, hogy képes vagyok mélyen érezni – ez értékes.
 
-Engedem, hogy átfolyjon rajtam. Nem tart örökké.
+Engedem, hogy átfolyjon rajtam, és tovatűnjön.
 
 Valami szép is velem van ma – akár egészen kicsi is.`,
     affirmation: `„A szomorúságom emberi. Átmegyek rajta – a saját tempómban."`,
     breath: 'Szív-koherencia légzés',
-    breathId: 'prep'
+    breathId: 'prep',
+    questions: [
+      "Mit gyászolsz valójában ebben a helyzetben?",
+      "Mit akar megmutatni neked a szomorúságod?",
+      "Milyen emlék hozna most egy mosolyt, még a fájdalom mellett is?",
+      "Mi lenne, ha a gyász is a szeretet egy formája lenne?"
+    ]
   },
   lonely: {
     icon: '😶',
@@ -4077,7 +4203,7 @@ Valami szép is velem van ma – akár egészen kicsi is.`,
 
 Ebben a pillanatban egyedül vagyok – és ez nehéz. Megengedem magamnak, hogy fájjon.
 
-De nem vagyok teljesen egyedül. Valahol most egy másik ember is hasonlót érez – ez az emberi tapasztalat közös szövete.
+Valahol most egy másik ember is hasonlót érez – ez az emberi tapasztalat közös szövete.
 
 A saját jelenlétem is egy forma kapcsolatnak. Figyelek magamra – ez számít.
 
@@ -4089,7 +4215,13 @@ A kapcsolat belülről indul – a saját magammal való jelenlétből.
 Ma egy kis kapcsolódást hozok a napomba.`,
     affirmation: `„Megérdemlem a kapcsolatot. Ma teszek egy kis lépést felé."`,
     breath: 'Szív-koherencia légzés',
-    breathId: 'prep'
+    breathId: 'prep',
+    questions: [
+      "Kivel szeretnél most igazán kapcsolódni?",
+      "Mi lenne, ha ez a magány most csak egy múló állomás lenne?",
+      "Milyen apró lépés vinne közelebb valakihez ma?",
+      "Mit adhatnál magadnak, amit most mástól várnál?"
+    ]
   },
   body: {
     icon: '😬',
@@ -4109,7 +4241,13 @@ Minden légzéssel egy kicsit több feszültség oldódik fel.
 A testem ma is megtett mindent értem – megköszönöm.`,
     affirmation: `„Figyelem a testemet és megadom neki, amire szüksége van."`,
     breath: '4-4-6 Mélylégzés',
-    breathId: '478'
+    breathId: '478',
+    questions: [
+      "Hol őrzi a tested ezt az érzést most?",
+      "Mi lenne, ha a tested üzenetét kíváncsian hallgatnád meg, félelem helyett?",
+      "Milyen mozdulat vagy érintés engedne fel valamit benned?",
+      "Mit szeretne a tested most leginkább?"
+    ]
   }
 };
 
@@ -4127,6 +4265,7 @@ function selectLjnTopic(id) {
 
 function renderLjn() {
   renderDailyPositive();
+  renderDailyQuestion();
   const t = LJN_TOPICS[currentLjnTopic];
   if (!t) return;
 
@@ -4154,6 +4293,14 @@ function renderLjn() {
   // Légzés ajánló
   const breathDesc = document.getElementById('ljnBreathDesc');
   if (breathDesc) breathDesc.textContent = t.breath;
+
+  // Kérdezd meg magadtól
+  const qList = document.getElementById('ljnQuestionsList');
+  if (qList && Array.isArray(t.questions)) {
+    qList.innerHTML = t.questions.map(q =>
+      `<div class="ljn-question-item">❓ ${q}</div>`
+    ).join('');
+  }
 }
 
 function confirmOldo() {
@@ -4498,17 +4645,8 @@ function resetPanic() {
 // MEDITÁCIÓ – ZENE + VIZUALIZÁCIÓ + SZEM MÓD
 // ============================================================
 
-// Szem mód és vizualizáció állapot
-let meditEyeMode = 'open';
+// Vizualizációs jelenet állapot
 let meditVizScene = 'forest';
-
-function setEyeMode(mode) {
-  meditEyeMode = mode;
-  document.getElementById('eyeOpen').classList.toggle('active', mode === 'open');
-  document.getElementById('eyeClosed').classList.toggle('active', mode === 'closed');
-  const vizRow = document.getElementById('meditVizRow');
-  if (vizRow) vizRow.style.display = mode === 'closed' ? 'block' : 'none';
-}
 
 const VIZ_PREVIEWS = {
   forest: '🌲 Puha moha a talpod alatt, fény szűrődik át a lombkoronán, madárének a távolból…',
@@ -4540,7 +4678,7 @@ const VIZ_SCENES = {
       'Érezd az erdő illatát – nedves föld, fenyő, friss levegő. Minden légvétellel mélyebbre kerülsz.',
       'A fák körülvesznek – régen itt állnak, erősek és csendesek. Te is megállhatsz köztük.',
       'A napfény foltokban szűrődik át a lombkoronán. Egy-egy fénycsík érinti az arcodat, melegen.',
-      'Az erdő befogad. Ebben a csendben semmi dolgodat nem kell elvégezned. Csak létezhetsz.',
+      'Az erdő befogad. Ebben a csendben csak létezhetsz.',
       'Egy régi, hatalmas fa előtt állsz. A gyökerei mélyre nyúlnak – mint a te erőd is.',
       'Az erdő szele halkan súg: rendben vagy. Mindig is rendben voltál.',
       'Lassan visszatérsz – de az erdő csendét magaddal viszed.'
@@ -4553,9 +4691,9 @@ const VIZ_SCENES = {
       'A tenger ritmikusan hullámzik. Be... és ki. Pont úgy, mint a légzésed.',
       'A víz illata körülvesz. A horizonton végtelen kék – nincs határ, nincs korlát.',
       'Minden hullám magával visz valamit a homokból – és visszahozza. Így van ez a feszültséggel is.',
-      'Ülj csendben és nézd a vizet. Nem kell sehova menned. A tenger elég.',
+      'Ülj csendben és nézd a vizet. Itt lehetsz, ahogy vagy – a tenger elég.',
       'A hullámok hangja beléd hatol – állandó, biztonságos ritmus. Te is részese vagy ennek.',
-      'A tenger nem ítélkezik. Befogad mindent – a könnyeit, a súlyát, az örömét.',
+      'A tenger mindent befogad – a könnyeit, a súlyát, az örömét.',
       'Lassan visszatérsz a partra – de a tenger ritmusa még sokáig veled marad.'
     ]
   },
@@ -4564,11 +4702,11 @@ const VIZ_SCENES = {
     steps: [
       'Képzeld el, hogy egy nyugodt, biztonságos helyen ülsz. Előtted megjelenik a kis önmagad – a gyermek, aki te voltál.',
       'Nézd meg ezt a gyermeket. Milyen idős? Milyen a ruhája? Mi látszik az arcán?',
-      'A gyermek rád néz. Nem kér semmit – csak látni szeretne. Jelen lenni szeretne veled.',
+      'A gyermek rád néz. Csak látni szeretne. Jelen lenni szeretne veled.',
       'Menj oda hozzá, ha szeretnéd. Tedd a kezed a vállára, vagy csak ülj mellé csendben.',
       'Ez a gyermek egykor mindent átélt, ami nehéz volt. Egyedül hordta. De most te ott vagy mellette.',
       'Mondd el neki – hangosan vagy csendben –, amit akkor hallani szeretett volna: "Rendben vagy. Biztonságban vagy. Szeretlek."',
-      'A gyermek mosolyog. Nem kell többé egyedül hordania. Te ott vagy.',
+      'A gyermek mosolyog. Együtt hordjátok most. Te ott vagy.',
       'Lassan intesz neki. Tudja, hogy bármikor visszajöhetsz hozzá – ő mindig vár rád.'
     ]
   },
@@ -4579,8 +4717,8 @@ const VIZ_SCENES = {
       'Előtted megjelenik a felsőbb éned – a bölcsebb, nyugodtabb önmagad. Az, akivé válni szeretnél.',
       'Ez a lény ismer téged teljesen. Minden döntésedet, minden hibádat, minden féltelmedet – és még mindig szeret.',
       'Nézd meg az arcát. Milyen nyugodt. Milyen teljes. Ez te vagy – csak egy kicsivel előrébb az úton.',
-      'Kérdezd meg, amit kérdezni szeretnél. Nem hangosan – csak gondolatban. Figyelj a válaszra.',
-      'A felsőbb éned nem ítélkezik. Nem siet. Csak van. Azt sugározza, ami te is lehetsz.',
+      'Kérdezd meg, amit kérdezni szeretnél – csendben, gondolatban. Figyelj a válaszra.',
+      'A felsőbb éned elfogad. Nyugodt. Csak van. Azt sugározza, ami te is lehetsz.',
       'Egy pillanatra közelebb kerül és azt mondja: "Jó úton jársz. Bízz magadban."',
       'Lassan visszatérsz – de a belső bölcsességed mindig elérhető marad. Csak csendben kell figyelni rá.'
     ]
@@ -4592,7 +4730,7 @@ const VIZ_SCENES = {
       'Hallod a víz csobogását – egy kis kőmedence, amelyben levelek úsznak. Minden mozgás lassú és szándékos.',
       'Cseresznyevirágok hullanak körülötted – halkan, egyenként. Minden egyes szirom elenged valamit.',
       'A kert tökéletesen rendezett – és mégis természetes. Rend és nyugalom egyszerre. Te is ilyen lehetsz.',
-      'Ülj csendben a kerti kövön. Semmi sietnivalód nincs. A kert nem vár semmit tőled.',
+      'Ülj csendben a kerti kövön. Csak legyél itt – a kert éppen ennyit kér.',
       'A szél halkan mozgatja a bambuszt – suttogó hang, mint egy régi dal. Csak figyeld.',
       'Minden a maga helyén van ebben a kertben. És te is a magad helyén vagy – most, itt.',
       'Lassan felállsz és elindulsz az ösvényen. A kert csendét magaddal viszed.'
@@ -4606,8 +4744,8 @@ const VIZ_SCENES = {
       'Érezd a tested súlyát – ahogy a föld megtart téged. Lent a biztonság, fent a végtelenség.',
       'Egy csillag halvány fénye különösen vonz. Talán régen kihunyt már – és mégis itt a fénye. Mint az emlékeid.',
       'A Tejút lassan átível felettéd. Milliárdnyi naprendszer – és te itt fekszel, a saját kis bolygódon.',
-      'Ebben a végtelenségben a problémáid nem tűnnek el – de más méretet kapnak. Könnyebb így.',
-      'A csillagos ég nem ítélkezik. Csak ragyog. Te is ragyoghatsz a magad módján.',
+      'Ebben a végtelenségben a problémáid más méretet kapnak. Könnyebb így.',
+      'A csillagos ég elfogad. Csak ragyog. Te is ragyoghatsz a magad módján.',
       'Lassan visszatérsz – de az égbolt tágasságát magaddal hozod.'
     ]
   }
@@ -4619,7 +4757,7 @@ const VIZ_SCENES = {
 const MEDIT_STEPS = [
   { icon: '🌸', text: `Helyezkedj el kényelmesen.
 
-Érezd, ahogy a tested súlya lefelé húz – az alap megtart téged. Nem kell semmit tartani, semmit elérni.
+Érezd, ahogy a tested súlya lefelé húz – az alap megtart téged. Elengedheted a tartást, elengedheted az elérendő célokat.
 
 Csak légy itt, ebben a pillanatban.`, dur: 25 },
 
@@ -4637,19 +4775,19 @@ Engedd meg magadnak ezt a figyelmet.`, dur: 30 },
 
   { icon: '🌊', text: `Figyeld meg, mi van most benned.
 
-Egy érzés, egy gondolat, egy súly – nem kell megváltoztatni, csak észrevenni.
+Egy érzés, egy gondolat, egy súly – elég csak észrevenni, ahogy van.
 
 Minden, ami felszínre jön, rendben van.`, dur: 32 },
 
   { icon: '✨', text: `A tested és az elméd most együtt pihen.
 
-Nem kell sehova menned, semmit megoldanod. Ez a néhány perc csak a tiéd.
+Csak itt lehetsz, ahogy vagy – ez a néhány perc csak a tiéd.
 
 Engedd, hogy ez a csend beléd szivárogjék.`, dur: 35 },
 
   { icon: '🌿', text: `Gondolj valamire, amit el szeretnél engedni – akár csak egy kicsit.
 
-Nem kell erőltetni. Elég, ha szándékban megvan.
+Elég, ha szándékban megvan – ez magától is elindul.
 
 A légzésed segít – minden kilégzéssel könnyebb leszel.`, dur: 32 },
 
@@ -4702,6 +4840,12 @@ function closeMeditation() {
 }
 
 function startMeditSession() {
+  // Védelem: ha valamiért már fut egy munkamenet (pl. a felhasználó
+  // gyorsan kétszer koppint, vagy egy korábbi indítás nem zárult le
+  // rendesen), előbb állítsuk le – különben a régi időzítők és a zene
+  // is tovább futnának a háttérben az újak mellett, összekeveredve.
+  if (meditState.active) stopMeditSession();
+
   const total = MEDIT_STEPS.reduce((a,b) => a + b.dur, 0);
   meditState = {
     active: true, stepIdx: 0, elapsed: 0, total,
@@ -4823,10 +4967,8 @@ function showOverlayText(text, type) {
 function finishMedit() {
   const textEl = document.getElementById('meditOlText');
   const iconEl = document.getElementById('meditPulseIcon');
-  const vizTextEl = document.getElementById('meditVizText');
-  if (textEl) textEl.innerHTML = 'A meditáció véget ért. ✨<br><br>Vidd magaddal ezt a nyugalmat.';
+  if (textEl) textEl.innerHTML = 'A meditáció véget ért. ✨<br><br>Vidd magaddal ezt a nyugalmat – hozd vissza magaddal mindazt, amit itt találtál.';
   if (iconEl) iconEl.textContent = '🌟';
-  if (vizTextEl) vizTextEl.textContent = 'Hozd vissza magaddal mindazt, amit itt találtál.';
   playTone(528, 1.5);
   setTimeout(() => { if (meditState.active) closeMeditation(); }, 5000);
 }
@@ -4991,7 +5133,13 @@ function getJournal() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch { return {}; }
 }
 function saveJournal(data) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    return true;
+  } catch (e) {
+    console.error('[IBAR] Napló mentése sikertelen:', e);
+    return false;
+  }
 }
 
 function todayKey() {
@@ -5229,35 +5377,80 @@ function checkDailyReminder() {
 const DAILY_POSITIVE = [
   { icon: '🌅', text: 'Ma is megteheted azt az egyetlen kis lépést. Csak azt az egyet.' },
   { icon: '💜', text: 'Elég vagy. Pontosan olyannak, amilyen ma vagy.' },
-  { icon: '🌱', text: 'A fejlődés nem mindig látható – de mindig történik, ha törekszél.' },
-  { icon: '🔥', text: 'Az erőd nem a hibátlanságodban van – hanem abban, hogy újra próbálod.' },
-  { icon: '🌊', text: 'Az érzések hullámok – átmennek. Te vagy a part, nem a hullám.' },
-  { icon: '✨', text: 'A gondoskodás magadról nem önzőség – ez az alap, amiből minden más épül.' },
+  { icon: '🌱', text: 'A fejlődés néha láthatatlan – de mindig történik, ha törekszel.' },
+  { icon: '🔥', text: 'Az erőd abban van, hogy újra és újra próbálod.' },
+  { icon: '🌊', text: 'Az érzések hullámok – átmennek. Te vagy a part, amely mindig megmarad.' },
+  { icon: '✨', text: 'A gondoskodás magadról alap, amiből minden más épül.' },
   { icon: '🤍', text: 'Megérdemled azt a kedvességet, amit másoknak oly könnyen adsz.' },
   { icon: '🌸', text: 'Minden nehéz nap, amin átvittél magad, bizonyítja a belső erődet.' },
-  { icon: '🎯', text: 'Nem kell mindent ma megoldani. Csak a következő lépést kell megtenni.' },
+  { icon: '🎯', text: 'Elég, ha ma csak a következő lépést teszed meg.' },
   { icon: '💛', text: 'A tested keményen dolgozik érted – minden egyes pillanatban.' },
   { icon: '🌿', text: 'Az elengedés is erő. Néha a legjobb döntés a megállás.' },
   { icon: '🦋', text: 'A változás belülről indul – és te már elkezdted.' },
   { icon: '🌙', text: 'A csend és a pihenés is produktív. A test ilyenkor dolgozik a legjobban.' },
   { icon: '💪', text: 'Minden alkalommal, amikor itt vagy és dolgozol magadon – az számít.' },
   { icon: '🌞', text: 'A jelen pillanat az egyetlen, ahol valóban változás történhet. És te itt vagy.' },
-  { icon: '🎵', text: 'A belső hangod, amelyik ítél, nem az igazság. Az igazság mélyebb és kedvesebb.' },
-  { icon: '🌺', text: 'Nem kell tökéletesnek lenned ahhoz, hogy értékes legyél.' },
+  { icon: '🎵', text: 'A belső ítélkező hang csak egy hang. Az igazság mélyebb és kedvesebb.' },
+  { icon: '🌺', text: 'Értékes vagy, pontosan úgy, ahogy most vagy.' },
   { icon: '💎', text: 'A legnehezebb napok is eltelnek. Holnap más lesz.' },
-  { icon: '🕊️', text: 'A béke nem azt jelenti, hogy minden rendben van – hanem hogy rendben vagy.' },
-  { icon: '🌈', text: 'A sebezhetőség bátorság – nem gyengeség.' },
+  { icon: '🕊️', text: 'A béke azt jelenti, hogy te magad rendben vagy.' },
+  { icon: '🌈', text: 'A sebezhetőség bátorság.' },
   { icon: '🍀', text: 'Minden apró jó dolog számít. Ma figyelj rájuk.' },
   { icon: '⭐', text: 'Azt adhatsz másoknak, amid van. Ma is van elég.' },
   { icon: '🤗', text: 'Kedvesnek lenni magaddal az első lépés mindenhová.' },
-  { icon: '🏔️', text: 'A nehézség nem azt jelzi, hogy rossz irányba mész – hanem hogy valami fontosat csinálsz.' },
-  { icon: '🌻', text: 'Nem kell megértemednie mindenkinek. Elég, ha te érted magad.' },
-  { icon: '💫', text: 'Az önismeret nem projekt – hanem utazás. Ma is haladtál rajta.' },
+  { icon: '🏔️', text: 'A nehézség azt jelzi, hogy valami fontosat csinálsz.' },
+  { icon: '🌻', text: 'Elég, ha te érted magad – ez a legfontosabb kiindulópont.' },
+  { icon: '💫', text: 'Az önismeret utazás. Ma is haladtál rajta.' },
   { icon: '🎁', text: 'A mai nap ajándéka: itt vagy, lélegzel, és van lehetőséged.' },
-  { icon: '🧡', text: 'Nem kell mindenkinek megfelelni. A saját értékeid az iránytűd.' },
+  { icon: '🧡', text: 'A saját értékeid az iránytűd.' },
   { icon: '🌍', text: 'Egy ember, aki rendben van önmagával – jobb hellyé teszi a körülötte lévő világot.' },
   { icon: '🕯️', text: 'Egy kis fény is elegendő a sötétben. Te is lehetsz az – magadnak és másoknak.' }
 ];
+
+// ============================================================
+// NAPI KÉRDÉS – a nap könnyebbé tétele, a gondolatok pozitívvá
+// alakítása, az élet szépségének felfedezése körül forognak.
+// Ugyanaz a napi-rotációs elv, mint a DAILY_POSITIVE-nál, csak
+// kérdés formában – nyitva hagyva a választ, nem megadva azt.
+// ============================================================
+const DAILY_QUESTIONS = [
+  // A nap könnyebbé tétele
+  { icon: '🌤️', text: 'Mi tenné most könnyebbé a következő órát?' },
+  { icon: '🎈', text: 'Milyen apró örömöt csempészhetnél a mai napodba?' },
+  { icon: '🪶', text: 'Mit tehetnél le most, hogy könnyebben haladj tovább?' },
+  { icon: '🤲', text: 'Ki vagy mi segítene most, ha megengednéd magadnak a segítséget?' },
+  { icon: '🌈', text: 'Milyen egyetlen lépés vinne előre most, bonyodalmak nélkül?' },
+  { icon: '🎉', text: 'Hogyan ünnepelhetnéd meg a mai nap apró sikereit?' },
+  { icon: '🧘', text: 'Mi lenne, ha a mai nap sokkal egyszerűbb lenne, mint gondolod?' },
+  { icon: '🌬️', text: 'Mit engedhetnél el, hogy könnyebb legyen a válladnak?' },
+  // Gondolatok pozitívvá tétele
+  { icon: '💭', text: 'Milyen gondolat szolgálna most jobban téged?' },
+  { icon: '🔍', text: 'Mit látnál másképp, ha kíváncsian néznél rá, ítélet helyett?' },
+  { icon: '🌟', text: 'Milyen lehetőség rejtőzik ebben a helyzetben?' },
+  { icon: '🙏', text: 'Miért lehetsz hálás ebben a pillanatban?' },
+  { icon: '🎁', text: 'Mi lenne, ha ez a nehézség valójában egy ajándék, amit most kezdesz felismerni?' },
+  { icon: '💪', text: 'Milyen erősséged mutatkozik meg éppen ebben a helyzetben?' },
+  { icon: '🗣️', text: 'Mit mondanál egy jó barátnak, aki ugyanezt élné át?' },
+  { icon: '🔄', text: 'Milyen új szemszögből nézhetnél a mai napra?' },
+  // Az élet szépségének felfedezése
+  { icon: '🌸', text: 'Mi az, ami ma megérintett, még ha csak egy pillanatra is?' },
+  { icon: '✨', text: 'Milyen apró csoda vesz körül most, amit eddig észre sem vettél?' },
+  { icon: '💞', text: 'Ki az, akinek a jelenléte szépíti az életedet?' },
+  { icon: '🎶', text: 'Milyen hangot, illatot vagy fényt élveznél most, ha megállnál egy percre?' },
+  { icon: '🌻', text: 'Mi az, amit szeretsz az életedben, amit ritkán mondasz ki hangosan?' },
+  { icon: '🕯️', text: 'Milyen emlék melegíti most a szívedet?' },
+  { icon: '😊', text: 'Mi az az apróság, ami ma mosolyt csalt az arcodra?' },
+  { icon: '🦋', text: 'Milyen szépséget fedezhetnél fel most, ha csak egy kicsit lassítanál?' }
+];
+
+function renderDailyQuestion() {
+  const dayOfYear = Math.floor((new Date() - new Date(new Date().getFullYear(),0,0)) / 86400000);
+  const q = DAILY_QUESTIONS[dayOfYear % DAILY_QUESTIONS.length];
+  const icon = document.getElementById('dqcIcon');
+  const text = document.getElementById('dqcText');
+  if (icon) icon.textContent = q.icon;
+  if (text) text.textContent = q.text;
+}
 
 function renderDailyPositive() {
   const dayOfYear = Math.floor((new Date() - new Date(new Date().getFullYear(),0,0)) / 86400000);
@@ -5297,9 +5490,13 @@ function saveToday() {
   const key = todayKey();
   const score = Object.values(todayChecks).filter(Boolean).length;
   journal[key] = { checks: {...todayChecks}, mood: todayMood, score, hrv: state.results.before?.rmssd || null };
-  saveJournal(journal);
-  renderJournal();
-  showSaveConfirm();
+  const ok = saveJournal(journal);
+  if (ok) {
+    renderJournal();
+    showSaveConfirm();
+  } else {
+    alert('⚠️ A mai nap mentése sikertelen volt. Ez előfordulhat, ha a böngésző tárhelye betelt, vagy inkognitó/privát módban vagy. Próbáld meg újra, vagy nyisd meg az appot normál (nem inkognitó) módban.');
+  }
 }
 
 function exportJournal() {
@@ -5507,16 +5704,16 @@ function drawTrend(journal) {
 // QUOTES
 // ============================================================
 const QUOTES = [
-  { text: 'Minden nap egy lépés a szabadság felé. A változás nem egyik napról a másikra jön – de minden egyes nap számít.', author: 'IBAR módszer' },
-  { text: 'Az oldás nem az, hogy elfelejtjük a múltat. Az oldás az, hogy megszűnik ártani.', author: 'IBAR módszer' },
+  { text: 'Minden nap egy lépés a szabadság felé. A változás fokozatosan érkezik – és minden egyes nap számít.', author: 'IBAR módszer' },
+  { text: 'Az oldás azt jelenti: a múlt emlékké szelídül, és megszűnik ártani.', author: 'IBAR módszer' },
   { text: 'A tested tudja az utat. A légzésed az összekötő kapocs a tudat és a tudatalatti között.', author: 'IBAR módszer' },
   { text: 'Minden egyes olvasással egy kicsit ismerősebb lesz az út. A rendszeresség az, ami igazán számít.', author: 'IBAR módszer' },
   { text: 'A szív-koherencia állapotában a tudatalatti nyitottá válik az új mintákra. Ez a valódi változás kapuja.', author: 'HeartMath Institute' },
   { text: 'A blokkod egykor védett téged. Most köszönöm neki, és elengedem.', author: 'IBAR oldószöveg' },
-  { text: 'A gyógyulás nem lineáris. De te minden nap itt vagy – és ez a legfontosabb.', author: 'IBAR módszer' },
+  { text: 'A gyógyulás hullámzik. Te minden nap itt vagy – és ez a legfontosabb.', author: 'IBAR módszer' },
   { text: 'Amit a test tart, a légzés felszabadítja.', author: 'Szomatikus terápia' },
-  { text: 'A HRV növekedése nem csak szám – az idegrendszered rugalmasságának visszatérése.', author: 'HRV kutatás' },
-  { text: 'Bízz a folyamatban. A mag a földben van, még ha nem is látod a hajtást.', author: 'IBAR módszer' },
+  { text: 'A HRV növekedése az idegrendszered rugalmasságának visszatérését is jelzi.', author: 'HRV kutatás' },
+  { text: 'Bízz a folyamatban. A mag már a földben van – a hajtás lassan úton van.', author: 'IBAR módszer' },
 ];
 
 function showDailyQuote() {
